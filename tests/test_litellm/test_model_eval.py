@@ -1,15 +1,17 @@
 """Tests for `scripts/model_eval`, the recorded-traffic replay used to compare models.
 
 The numbers this tool prints are the whole point of it, so the cases below pin
-down the arithmetic (TTFT, TPOT, cached-token pricing), the request rewriting
-(model swap, forced `include_usage`), and the replay ordering. A regression in
-any of those silently produces a plausible-looking but wrong comparison.
+down the measurement (TTFT, TPOT), the request rewriting (model swap, forced
+`include_usage`), the replay ordering, and the DuckDB views that turn measured
+tokens into money. A regression in any of those silently produces a
+plausible-looking but wrong comparison.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,13 +34,15 @@ from model_eval.client import (  # noqa: E402
     summarise_stream,
     tpot_ms,
 )
-from model_eval.pricing import ModelPrice, TokenCounts, compute_cost, load_price_table  # noqa: E402
-from model_eval.report import distribution, summarise, write_report  # noqa: E402
-from model_eval.runner import run_evaluation  # noqa: E402
+from model_eval.pricing import ModelPrice, load_price_table  # noqa: E402
+from model_eval.report import export_workbook, format_console_table  # noqa: E402
+from model_eval.runner import EvalResult, run_evaluation  # noqa: E402
+from model_eval.storage import EvalStore, RunMetadata, open_store  # noqa: E402
 from model_eval.templates import write_pricing_template, write_workload_template  # noqa: E402
 from model_eval.workload import WorkloadRow, load_workload, order_rows  # noqa: E402
 
 openpyxl = pytest.importorskip("openpyxl")
+pytest.importorskip("duckdb")
 
 TARGET = ProxyTarget(base_url="http://localhost:4000", api_key="sk-test", timeout_s=30.0)
 
@@ -52,8 +56,8 @@ def _row(user_id: str, timestamp: str, sheet_row: int = 1, stream: bool = True) 
     )
 
 
-def _price(model: str = "vendor-a", **overrides: float | str) -> ModelPrice:
-    defaults: dict[str, float | str] = {
+def _price(model: str = "vendor-a", **overrides: float | str | None) -> ModelPrice:
+    defaults: dict[str, float | str | None] = {
         "label": model,
         "input_per_1m": 10.0,
         "output_per_1m": 30.0,
@@ -61,7 +65,7 @@ def _price(model: str = "vendor-a", **overrides: float | str) -> ModelPrice:
         "cache_write_per_1m": 12.5,
         "currency": "USD",
     }
-    return ModelPrice(model=model, **{**defaults, **overrides})  # type: ignore[arg-type]  # kwargs are checked by ModelPrice
+    return ModelPrice(model=model, **{**defaults, **overrides})  # type: ignore[arg-type]  # checked by ModelPrice
 
 
 def _chunk(elapsed_s: float, payload: dict[str, object]) -> TimedChunk:
@@ -75,6 +79,68 @@ def _sse(*payloads: dict[str, object]) -> bytes:
 
 def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> Iterator[EvalStore]:
+    with open_store(tmp_path / "eval.duckdb") as opened:
+        yield opened
+
+
+def _record_run(
+    store: EvalStore,
+    prices: tuple[ModelPrice, ...],
+    handler,
+    rows: tuple[WorkloadRow, ...] = (),
+    repeat: int = 1,
+    stream_mode: str = "as_recorded",
+) -> str:
+    store.replace_prices(prices)
+    run = RunMetadata(
+        run_id="run-1",
+        started_at=datetime.now(tz=timezone.utc),
+        base_url="http://localhost:4000",
+        workload="workload.xlsx",
+        stream_mode=stream_mode,
+        repeat_count=repeat,
+        note="",
+    )
+    store.start_run(run)
+    with _client(handler) as client:
+        for result in run_evaluation(
+            client=client,
+            target=TARGET,
+            prices=prices,
+            rows=rows or (_row("u", "2026-01-01T10:00:00"),),
+            stream_mode=stream_mode,  # pyright: ignore[reportArgumentType]  # constrained by the callers
+            repeat=repeat,
+        ):
+            store.record(run.run_id, result)
+    store.finish_run(run.run_id)
+    return run.run_id
+
+
+def _streaming_handler(prompt_tokens: int = 100, completion_tokens: int = 10, cached: int = 0, created: int = 0):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse(
+                {"choices": [{"delta": {"role": "assistant"}}]},
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                        "prompt_tokens_details": {"cached_tokens": cached, "cache_creation_tokens": created},
+                    },
+                },
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return handler
 
 
 class TestOrdering:
@@ -140,15 +206,15 @@ class TestWorkloadLoading:
 
         assert len(load_workload(path).rows) == 1
 
-    def test_generated_template_is_loadable(self, tmp_path: Path):
+    def test_generated_templates_are_loadable_and_demo_ready(self, tmp_path: Path):
         write_workload_template(tmp_path / "w.xlsx")
         write_pricing_template(tmp_path / "p.xlsx")
 
-        assert len(load_workload(tmp_path / "w.xlsx").rows) == 1
-        assert [price.model for price in load_price_table(tmp_path / "p.xlsx").prices] == [
-            "vendor-a-deepseek-v3",
-            "vendor-b-deepseek-v3",
-        ]
+        workload = load_workload(tmp_path / "w.xlsx")
+        prices = load_price_table(tmp_path / "p.xlsx").prices
+
+        assert len({row.user_id for row in workload.rows}) > 1
+        assert "mock-fast" in {price.model for price in prices}
 
 
 class TestBodyRewrite:
@@ -208,14 +274,14 @@ class TestStreamMetrics:
         assert first_token_ms(tool_call) == pytest.approx(300.0)
 
     def test_tpot_divides_the_post_first_token_time_by_the_remaining_tokens(self):
-        usage = summarise_stream(
+        result = summarise_stream(
             (_chunk(0.2, {"choices": [{"delta": {"content": "x"}}], "usage": {"completion_tokens": 5}}),),
             total_ms=1000.0,
         )
-        assert isinstance(usage, CallSucceeded)
+        assert isinstance(result, CallSucceeded)
 
-        assert usage.ttft_ms == pytest.approx(200.0)
-        assert usage.tpot_ms == pytest.approx(200.0)
+        assert result.ttft_ms == pytest.approx(200.0)
+        assert result.tpot_ms == pytest.approx(200.0)
 
     def test_tpot_is_unavailable_for_a_single_token_answer(self):
         result = summarise_stream(
@@ -263,7 +329,9 @@ class TestStreamMetrics:
 
     def test_streamed_tool_call_fragments_are_reassembled(self):
         chunks = (
-            _chunk(0.1, {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f"}}]}}]}),
+            _chunk(
+                0.1, {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f"}}]}}]}
+            ),
             _chunk(0.2, {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"a":'}}]}}]}),
             _chunk(0.3, {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]}}]}),
         )
@@ -286,22 +354,14 @@ class TestHttpCalls:
 
         def handler(request: httpx.Request) -> httpx.Response:
             sent.append(json.loads(request.content))
-            return httpx.Response(
-                200,
-                content=_sse(
-                    {"model": "vendor-a", "choices": [{"delta": {"role": "assistant"}}]},
-                    {"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]},
-                    {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}},
-                ),
-                headers={"content-type": "text/event-stream"},
-            )
+            return _streaming_handler(prompt_tokens=12, completion_tokens=3)(request)
 
         with _client(handler) as client:
             result = call_model(client, TARGET, "vendor-a", _row("u", "2026-01-01T00:00:00").body, "as_recorded")
 
         assert isinstance(result, CallSucceeded)
         assert result.streamed is True
-        assert result.content == "hi"
+        assert result.content == "ok"
         assert result.usage is not None and result.usage.completion_tokens == 3
         assert sent[0]["model"] == "vendor-a"
         assert sent[0]["stream_options"] == {"include_usage": True}
@@ -386,90 +446,16 @@ class TestHttpCalls:
         assert seen == [None]
 
 
-class TestPricing:
-    def test_cached_and_cache_write_tokens_are_billed_at_their_own_rate(self):
-        cost = compute_cost(
-            _price(),
-            TokenCounts(prompt_tokens=1000, completion_tokens=50, cached_tokens=800, cache_creation_tokens=100),
-        )
-
-        assert cost.uncached_input == pytest.approx(100 * 10.0 / 1e6)
-        assert cost.cached_input == pytest.approx(800 * 1.0 / 1e6)
-        assert cost.cache_write == pytest.approx(100 * 12.5 / 1e6)
-        assert cost.output == pytest.approx(50 * 30.0 / 1e6)
-        assert cost.total == pytest.approx(0.00455)
-
-    def test_a_full_cache_hit_never_double_charges_the_prompt(self):
-        cost = compute_cost(
-            _price(),
-            TokenCounts(prompt_tokens=500, completion_tokens=0, cached_tokens=500, cache_creation_tokens=0),
-        )
-
-        assert cost.uncached_input == 0.0
-        assert cost.total == pytest.approx(500 * 1.0 / 1e6)
-
-    def test_blank_cache_columns_fall_back_to_the_input_price(self, tmp_path: Path):
-        workbook = openpyxl.Workbook()
-        sheet = workbook.worksheets[0]
-        sheet.append(["model", "input_per_1m", "output_per_1m"])
-        sheet.append(["vendor-a", 10.0, 30.0])
-        workbook.save(tmp_path / "p.xlsx")
-
-        price = load_price_table(tmp_path / "p.xlsx").prices[0]
-        cost = compute_cost(
-            price,
-            TokenCounts(prompt_tokens=1000, completion_tokens=0, cached_tokens=400, cache_creation_tokens=0),
-        )
-
-        assert price.cache_read_per_1m == 10.0
-        assert cost.total == pytest.approx(1000 * 10.0 / 1e6)
-
-    def test_a_price_sheet_without_the_required_columns_is_rejected(self, tmp_path: Path):
-        workbook = openpyxl.Workbook()
-        workbook.worksheets[0].append(["model", "price"])
-        workbook.save(tmp_path / "p.xlsx")
-
-        table = load_price_table(tmp_path / "p.xlsx")
-
-        assert table.prices == ()
-        assert "input_per_1m" in table.problems[0].reason
-
-    def test_currency_and_label_default_but_are_kept_when_given(self, tmp_path: Path):
-        workbook = openpyxl.Workbook()
-        sheet = workbook.worksheets[0]
-        sheet.append(["model", "input_per_1m", "output_per_1m", "label", "currency"])
-        sheet.append(["vendor-a", 1, 2, None, None])
-        sheet.append(["vendor-b", 1, 2, "vendor B", "cny"])
-        workbook.save(tmp_path / "p.xlsx")
-
-        prices = load_price_table(tmp_path / "p.xlsx").prices
-
-        assert (prices[0].label, prices[0].currency) == ("vendor-a", "USD")
-        assert (prices[1].label, prices[1].currency) == ("vendor B", "CNY")
-
-
-class TestRunAndReport:
-    def _handler(self, calls: list[str]):
-        def handler(request: httpx.Request) -> httpx.Response:
-            payload = json.loads(request.content)
-            calls.append(str(payload["model"]))
-            return httpx.Response(
-                200,
-                content=_sse(
-                    {"choices": [{"delta": {"role": "assistant"}}]},
-                    {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
-                    {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}},
-                ),
-                headers={"content-type": "text/event-stream"},
-            )
-
-        return handler
-
+class TestReplayOrder:
     def test_every_model_replays_every_request_in_order(self):
         calls: list[str] = []
-        rows = (_row("bob", "2026-01-01T10:00:00", 1), _row("alice", "2026-01-01T09:00:00", 2))
 
-        with _client(self._handler(calls)) as client:
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(json.loads(request.content)["model"]))
+            return _streaming_handler()(request)
+
+        rows = (_row("bob", "2026-01-01T10:00:00", 1), _row("alice", "2026-01-01T09:00:00", 2))
+        with _client(handler) as client:
             results = tuple(
                 run_evaluation(
                     client=client,
@@ -489,121 +475,260 @@ class TestRunAndReport:
             ("vendor-a", 2, "bob"),
         ]
 
-    def test_results_carry_the_cost_of_the_model_that_served_them(self):
-        with _client(self._handler([])) as client:
-            results = tuple(
-                run_evaluation(
-                    client=client,
-                    target=TARGET,
-                    prices=(_price("vendor-a", input_per_1m=10.0, output_per_1m=30.0),),
-                    rows=(_row("u", "2026-01-01T10:00:00"),),
-                    stream_mode="as_recorded",
-                )
-            )
 
-        assert results[0].cost is not None
-        assert results[0].cost.total == pytest.approx(100 * 10.0 / 1e6 + 10 * 30.0 / 1e6)
+class TestPriceStorage:
+    def test_prices_round_trip_including_absent_cache_columns(self, store: EvalStore):
+        store.replace_prices((_price("vendor-a"), _price("vendor-b", cache_read_per_1m=None, currency="CNY")))
 
-    def test_a_failed_call_is_summarised_without_inventing_a_cost(self):
+        prices = store.prices()
+
+        assert [price.model for price in prices] == ["vendor-a", "vendor-b"]
+        assert prices[0].cache_read_per_1m == 1.0
+        assert prices[1].cache_read_per_1m is None
+        assert prices[1].currency == "CNY"
+
+    def test_importing_again_replaces_the_table_rather_than_appending(self, store: EvalStore):
+        store.replace_prices((_price("vendor-a"), _price("vendor-b")))
+        store.replace_prices((_price("vendor-c"),))
+
+        assert [price.model for price in store.prices()] == ["vendor-c"]
+
+    def test_selecting_models_keeps_the_requested_order_and_drops_unknown_ones(self, store: EvalStore):
+        store.replace_prices((_price("vendor-a"), _price("vendor-b")))
+
+        assert [price.model for price in store.prices(("vendor-b", "nope", "vendor-a"))] == ["vendor-b", "vendor-a"]
+
+    def test_a_disabled_row_is_never_evaluated(self, store: EvalStore):
+        store.replace_prices((_price("vendor-a"), _price("vendor-b")))
+        store.connection.execute("UPDATE model_prices SET enabled = FALSE WHERE model = 'vendor-b'")
+
+        assert [price.model for price in store.prices()] == ["vendor-a"]
+
+    def test_excel_import_feeds_the_table(self, store: EvalStore, tmp_path: Path):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.worksheets[0]
+        sheet.append(["model", "input_per_1m", "output_per_1m", "label", "currency"])
+        sheet.append(["vendor-a", 1, 2, None, None])
+        sheet.append(["vendor-b", 1, 2, "vendor B", "cny"])
+        workbook.save(tmp_path / "p.xlsx")
+
+        store.replace_prices(load_price_table(tmp_path / "p.xlsx").prices)
+        prices = store.prices()
+
+        assert (prices[0].label, prices[0].currency) == ("vendor-a", "USD")
+        assert (prices[1].label, prices[1].currency) == ("vendor B", "CNY")
+        assert prices[0].cache_read_per_1m is None
+
+    def test_a_price_sheet_without_the_required_columns_is_rejected(self, tmp_path: Path):
+        workbook = openpyxl.Workbook()
+        workbook.worksheets[0].append(["model", "price"])
+        workbook.save(tmp_path / "p.xlsx")
+
+        table = load_price_table(tmp_path / "p.xlsx")
+
+        assert table.prices == ()
+        assert "input_per_1m" in table.problems[0].reason
+
+
+class TestCostView:
+    def _cost(self, store: EvalStore, run_id: str) -> dict[str, float]:
+        row = store.connection.execute(
+            "SELECT cost_uncached_input, cost_cached_input, cost_cache_write, cost_output, cost_total "
+            "FROM eval_request_costs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        assert row is not None
+        return dict(zip(("uncached", "cached", "write", "output", "total"), row, strict=True))
+
+    def test_cached_and_cache_write_tokens_are_billed_at_their_own_rate(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price(),),
+            _streaming_handler(prompt_tokens=1000, completion_tokens=50, cached=800, created=100),
+        )
+
+        cost = self._cost(store, run_id)
+
+        assert cost["uncached"] == pytest.approx(100 * 10.0 / 1e6)
+        assert cost["cached"] == pytest.approx(800 * 1.0 / 1e6)
+        assert cost["write"] == pytest.approx(100 * 12.5 / 1e6)
+        assert cost["output"] == pytest.approx(50 * 30.0 / 1e6)
+        assert cost["total"] == pytest.approx(0.00455)
+
+    def test_a_full_cache_hit_never_double_charges_the_prompt(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price(),),
+            _streaming_handler(prompt_tokens=500, completion_tokens=0, cached=500),
+        )
+
+        cost = self._cost(store, run_id)
+
+        assert cost["uncached"] == 0.0
+        assert cost["total"] == pytest.approx(500 * 1.0 / 1e6)
+
+    def test_usage_claiming_more_cached_tokens_than_prompt_tokens_cannot_go_negative(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price(),),
+            _streaming_handler(prompt_tokens=100, completion_tokens=0, cached=500),
+        )
+
+        cost = self._cost(store, run_id)
+
+        assert cost["uncached"] == 0.0
+        assert cost["total"] == pytest.approx(100 * 1.0 / 1e6)
+
+    def test_a_blank_cache_price_falls_back_to_the_input_price(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price(cache_read_per_1m=None),),
+            _streaming_handler(prompt_tokens=1000, completion_tokens=0, cached=400),
+        )
+
+        assert self._cost(store, run_id)["total"] == pytest.approx(1000 * 10.0 / 1e6)
+
+    def test_correcting_a_price_revalues_a_run_that_already_finished(self, store: EvalStore):
+        run_id = _record_run(store, (_price(output_per_1m=30.0),), _streaming_handler(completion_tokens=10))
+        before = store.summary(run_id)[0].cost_total
+
+        store.connection.execute("UPDATE model_prices SET output_per_1m = 60.0 WHERE model = 'vendor-a'")
+        after = store.summary(run_id)[0].cost_total
+
+        assert after == pytest.approx(before + 10 * 30.0 / 1e6)
+
+    def test_a_failed_call_has_no_cost_and_no_invented_tokens(self, store: EvalStore):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(503, json={"error": "unavailable"})
 
-        with _client(handler) as client:
-            results = tuple(
-                run_evaluation(
-                    client=client,
-                    target=TARGET,
-                    prices=(_price("vendor-a"),),
-                    rows=(_row("u", "2026-01-01T10:00:00"),),
-                    stream_mode="force_non_stream",
-                )
-            )
+        run_id = _record_run(store, (_price(),), handler, stream_mode="force_non_stream")
 
-        summary = summarise(results)[0]
-        assert results[0].cost is None
-        assert (summary.succeeded, summary.failed) == (0, 1)
-        assert summary.cost_total == 0.0
-        assert summary.ttft_ms is None
+        row = store.connection.execute(
+            "SELECT status, error_kind, http_status, prompt_tokens, cost_total FROM eval_request_costs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
 
-    def test_summary_reports_per_model_percentiles_and_unit_cost(self):
-        calls: list[str] = []
-        with _client(self._handler(calls)) as client:
-            results = tuple(
-                run_evaluation(
-                    client=client,
-                    target=TARGET,
-                    prices=(_price("vendor-a"), _price("vendor-b", output_per_1m=60.0)),
-                    rows=(_row("u", "2026-01-01T10:00:00"),),
-                    stream_mode="as_recorded",
-                    repeat=3,
-                )
-            )
+        assert row == ("failed", "http_status", 503, None, None)
 
-        summaries = summarise(results)
 
-        assert [summary.price.model for summary in summaries] == ["vendor-a", "vendor-b"]
+class TestSummary:
+    def test_reports_per_model_totals_and_unit_cost(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price("vendor-a"), _price("vendor-b", output_per_1m=60.0)),
+            _streaming_handler(prompt_tokens=100, completion_tokens=10),
+            repeat=3,
+        )
+
+        summaries = store.summary(run_id)
+
+        assert [summary.model for summary in summaries] == ["vendor-a", "vendor-b"]
         assert [summary.requests for summary in summaries] == [3, 3]
         assert summaries[0].completion_tokens == 30
         assert summaries[1].cost_total == pytest.approx(summaries[0].cost_total + 30 * 30.0 / 1e6)
         assert summaries[0].cost_per_request == pytest.approx(summaries[0].cost_total / 3)
         assert summaries[0].cost_per_1m_output_tokens == pytest.approx(summaries[0].cost_total * 1e6 / 30)
 
-    def test_cache_hit_rate_is_the_cached_share_of_the_prompt(self):
+    def test_cache_hit_rate_is_the_cached_share_of_the_prompt(self, store: EvalStore):
+        run_id = _record_run(
+            store,
+            (_price(),),
+            _streaming_handler(prompt_tokens=200, completion_tokens=5, cached=150),
+        )
+
+        assert store.summary(run_id)[0].cache_hit_rate == pytest.approx(0.75)
+
+    def test_a_failed_run_counts_the_failure_and_totals_nothing(self, store: EvalStore):
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "choices": [{"message": {"content": "x"}}],
-                    "usage": {
-                        "prompt_tokens": 200,
-                        "completion_tokens": 5,
-                        "prompt_tokens_details": {"cached_tokens": 150},
-                    },
-                },
+            return httpx.Response(503, json={"error": "unavailable"})
+
+        run_id = _record_run(store, (_price(),), handler, stream_mode="force_non_stream")
+        summary = store.summary(run_id)[0]
+
+        assert (summary.succeeded, summary.failed) == (0, 1)
+        assert summary.cost_total == 0.0
+        assert summary.ttft_ms_p50 is None
+        assert summary.cost_per_request is None
+
+    def test_percentiles_are_nearest_rank_so_small_samples_stay_observed_values(self, store: EvalStore):
+        store.replace_prices((_price(),))
+        store.start_run(
+            RunMetadata(
+                run_id="run-p",
+                started_at=datetime.now(tz=timezone.utc),
+                base_url="",
+                workload="",
+                stream_mode="as_recorded",
+                repeat_count=1,
+                note="",
             )
+        )
+        for sequence, latency in enumerate((10.0, 20.0, 30.0, 40.0), start=1):
+            store.record("run-p", _synthetic_result(sequence, latency))
 
-        with _client(handler) as client:
-            results = tuple(
-                run_evaluation(
-                    client=client,
-                    target=TARGET,
-                    prices=(_price("vendor-a"),),
-                    rows=(_row("u", "2026-01-01T10:00:00"),),
-                    stream_mode="force_non_stream",
-                )
-            )
+        summary = store.summary("run-p")[0]
 
-        assert summarise(results)[0].cache_hit_rate == pytest.approx(0.75)
+        assert (summary.total_ms_p50, summary.total_ms_p90, summary.total_ms_p99) == (20.0, 40.0, 40.0)
+        assert summary.total_ms_mean == pytest.approx(25.0)
 
-    def test_percentiles_use_nearest_rank_so_small_samples_stay_observed_values(self):
-        dist = distribution((10.0, 20.0, 30.0, 40.0))
+    def test_the_latest_run_is_the_one_reported_by_default(self, store: EvalStore):
+        _record_run(store, (_price(),), _streaming_handler())
 
-        assert dist is not None
-        assert (dist.p50, dist.p90, dist.p99, dist.mean) == (20.0, 40.0, 40.0, 25.0)
+        assert store.latest_run_id() == "run-1"
 
-    def test_workbook_holds_a_summary_sheet_and_one_row_per_request(self, tmp_path: Path):
-        with _client(self._handler([])) as client:
-            results = tuple(
-                run_evaluation(
-                    client=client,
-                    target=TARGET,
-                    prices=(_price("vendor-a"),),
-                    rows=(_row("u", "2026-01-01T10:00:00"),),
-                    stream_mode="as_recorded",
-                    repeat=2,
-                )
-            )
 
-        report_path = tmp_path / "report.xlsx"
-        write_report(report_path, results, summarise(results))
-        workbook = openpyxl.load_workbook(report_path)
+class TestOutput:
+    def test_workbook_exports_the_summary_and_the_priced_requests(self, store: EvalStore, tmp_path: Path):
+        run_id = _record_run(
+            store,
+            (_price(),),
+            _streaming_handler(prompt_tokens=100, completion_tokens=10),
+            repeat=2,
+        )
+
+        export_workbook(store, tmp_path / "report.xlsx", run_id)
+        workbook = openpyxl.load_workbook(tmp_path / "report.xlsx")
 
         assert workbook.sheetnames == ["summary", "requests"]
         requests_sheet = workbook["requests"]
         headers = [cell.value for cell in requests_sheet[1]]
         assert requests_sheet.max_row == 3
         assert {"ttft_ms", "tpot_ms", "total_ms", "cached_tokens", "cost_total", "response"} <= set(headers)
-        first_row = dict(zip(headers, [cell.value for cell in requests_sheet[2]]))
+        first_row = dict(zip(headers, [cell.value for cell in requests_sheet[2]], strict=True))
         assert first_row["status"] == "ok"
         assert first_row["response"] == "ok"
         assert first_row["completion_tokens"] == 10
+        assert first_row["cost_total"] == pytest.approx(100 * 10.0 / 1e6 + 10 * 30.0 / 1e6)
+
+    def test_console_table_shows_one_line_per_model_plus_a_header(self, store: EvalStore):
+        run_id = _record_run(store, (_price("vendor-a"), _price("vendor-b")), _streaming_handler())
+
+        lines = format_console_table(store.summary(run_id)).splitlines()
+
+        assert len(lines) == 3
+        assert "model" in lines[0]
+        assert "vendor-a" in lines[1] and "vendor-b" in lines[2]
+
+
+def _synthetic_result(sequence: int, total_ms: float) -> EvalResult:
+    return EvalResult(
+        price=_price(),
+        repetition=1,
+        sequence=sequence,
+        called_at=datetime.now(tz=timezone.utc),
+        row=_row("u", "2026-01-01T10:00:00", sheet_row=sequence),
+        outcome=CallSucceeded(
+            streamed=True,
+            total_ms=total_ms,
+            ttft_ms=total_ms / 2,
+            tpot_ms=None,
+            usage=None,
+            content="",
+            reasoning="",
+            tool_calls="",
+            finish_reason="stop",
+            chunk_count=1,
+            response_model="vendor-a",
+            proxy_reported_cost=None,
+        ),
+    )

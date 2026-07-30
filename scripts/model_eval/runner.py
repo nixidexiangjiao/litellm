@@ -10,11 +10,12 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
-from .client import CallFailed, CallOutcome, CallSucceeded, ProxyTarget, StreamMode, call_model
-from .pricing import CostBreakdown, ModelPrice, TokenCounts, compute_cost
+from .client import CallOutcome, ProxyTarget, StreamMode, call_model
+from .pricing import ModelPrice
 from .workload import WorkloadRow
 
 
@@ -23,9 +24,9 @@ class EvalResult:
     price: ModelPrice
     repetition: int
     sequence: int
+    called_at: datetime
     row: WorkloadRow
     outcome: CallOutcome
-    cost: CostBreakdown | None
 
 
 def run_evaluation(
@@ -55,30 +56,12 @@ def _run_one(
     row: WorkloadRow,
     stream_mode: StreamMode,
 ) -> EvalResult:
-    outcome = call_model(client, target, price.model, row.body, stream_mode)
+    called_at = datetime.now(tz=timezone.utc)
     return EvalResult(
         price=price,
         repetition=repetition,
         sequence=sequence,
+        called_at=called_at,
         row=row,
-        outcome=outcome,
-        cost=_cost_of(price, outcome),
+        outcome=call_model(client, target, price.model, row.body, stream_mode),
     )
-
-
-def _cost_of(price: ModelPrice, outcome: CallOutcome) -> CostBreakdown | None:
-    match outcome:
-        case CallFailed():
-            return None
-        case CallSucceeded(usage=None):
-            return None
-        case CallSucceeded(usage=usage):
-            return compute_cost(
-                price,
-                TokenCounts(
-                    prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens,
-                    cached_tokens=usage.cached_tokens,
-                    cache_creation_tokens=usage.cache_creation_tokens,
-                ),
-            )

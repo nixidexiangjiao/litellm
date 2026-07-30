@@ -1,0 +1,104 @@
+# LiteLLM proxy config for a price/performance bake-off
+#
+# The pattern that matters: model_name is the label the evaluation calls and the key in
+# the DuckDB model_prices table, litellm_params.model is who actually serves it. Give the
+# same upstream model one model_name per vendor and the report compares them side by side
+#
+# Keys come from the environment (see .env.example). Start with:
+#   litellm --config config.yaml --port 4000
+
+model_list:
+  # ---------------------------------------------------------------------------
+  # No keys needed: the bundled mock provider, for verifying the pipeline itself
+  # python -m model_eval.mock_provider --port 4123
+  # ---------------------------------------------------------------------------
+  - model_name: mock-fast
+    litellm_params:
+      model: openai/mock-fast
+      api_base: http://127.0.0.1:4123/v1
+      api_key: not-needed
+
+  # ---------------------------------------------------------------------------
+  # Same model, three vendors. This is the comparison the tool is built for
+  # ---------------------------------------------------------------------------
+  - model_name: deepseek-official
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: deepseek-volcengine
+    litellm_params:
+      # Volcengine Ark: `model` is the endpoint id (ep-...) or the model id you enabled
+      model: volcengine/deepseek-v3-2-251201
+      api_key: os.environ/VOLCENGINE_API_KEY
+      api_base: https://ark.cn-beijing.volces.com/api/v3
+
+  - model_name: deepseek-siliconflow
+    litellm_params:
+      # SiliconFlow has no dedicated LiteLLM provider; it is OpenAI-compatible,
+      # which is the general recipe for any vendor not listed natively
+      model: openai/deepseek-ai/DeepSeek-V3
+      api_key: os.environ/SILICONFLOW_API_KEY
+      api_base: https://api.siliconflow.cn/v1
+
+  # ---------------------------------------------------------------------------
+  # Different models, for a straight capability/price comparison
+  # ---------------------------------------------------------------------------
+  - model_name: qwen-dashscope
+    litellm_params:
+      model: dashscope/qwen-flash
+      api_key: os.environ/DASHSCOPE_API_KEY
+
+  - model_name: kimi-moonshot
+    litellm_params:
+      model: moonshot/kimi-k2-turbo-preview
+      api_key: os.environ/MOONSHOT_API_KEY
+
+  - model_name: gpt-openai
+    litellm_params:
+      model: openai/gpt-4.1
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: claude-anthropic
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: gemini-google
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  # ---------------------------------------------------------------------------
+  # Cloud-hosted variants: same family, different billing and latency profile
+  # ---------------------------------------------------------------------------
+  - model_name: claude-bedrock
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_region_name: us-east-1
+      aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+
+  - model_name: gpt-azure
+    litellm_params:
+      model: azure/my-gpt-4-1-deployment
+      api_base: os.environ/AZURE_API_BASE
+      api_key: os.environ/AZURE_API_KEY
+      api_version: "2024-10-21"
+
+  # ---------------------------------------------------------------------------
+  # Self-hosted, for the "is renting worth it" line of the comparison.
+  # Give these a price per 1M in model_prices derived from your GPU cost
+  # ---------------------------------------------------------------------------
+  - model_name: qwen-local-vllm
+    litellm_params:
+      model: hosted_vllm/Qwen/Qwen3-8B
+      api_base: http://127.0.0.1:8000/v1
+      api_key: none
+
+litellm_settings:
+  # The replay reads x-litellm-response-cost as a cross-check against your own price table
+  drop_params: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
