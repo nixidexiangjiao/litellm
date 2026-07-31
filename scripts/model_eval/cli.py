@@ -179,8 +179,12 @@ def _report(store: EvalStore, run_id: str | None, xlsx: Path | None) -> int:
 
 
 def _sql(store: EvalStore, query: str) -> int:
-    """Ad-hoc reporting; the views are the point of keeping results in DuckDB."""
-    store.connection.sql(query).show()
+    """Ad-hoc reporting and price edits; the views are the point of keeping results in DuckDB."""
+    relation = store.connection.sql(query)
+    if relation is None:
+        _say("ok")
+        return 0
+    relation.show()
     return 0
 
 

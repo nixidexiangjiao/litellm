@@ -34,6 +34,7 @@ from model_eval.client import (  # noqa: E402
     summarise_stream,
     tpot_ms,
 )
+from model_eval.cli import main  # noqa: E402
 from model_eval.pricing import ModelPrice, load_price_table  # noqa: E402
 from model_eval.report import export_workbook, format_console_table  # noqa: E402
 from model_eval.runner import EvalResult, run_evaluation  # noqa: E402
@@ -675,6 +676,56 @@ class TestSummary:
         _record_run(store, (_price(),), _streaming_handler())
 
         assert store.latest_run_id() == "run-1"
+
+
+class TestCommandLine:
+    """The setup path a new operator actually walks: empty directory to priced table."""
+
+    def _price_sheet(self, path: Path) -> Path:
+        workbook = openpyxl.Workbook()
+        sheet = workbook.worksheets[0]
+        sheet.append(["model", "input_per_1m", "output_per_1m", "label"])
+        sheet.append(["vendor-a", 10.0, 30.0, "vendor A"])
+        workbook.save(path)
+        return path
+
+    def test_the_schema_is_created_on_first_use_of_a_missing_database(self, tmp_path: Path):
+        database = tmp_path / "nested" / "eval.duckdb"
+
+        assert main(["list-prices", "--db", str(database)]) == 0
+
+        with open_store(database) as store:
+            created = {
+                str(row[0])
+                for row in store.connection.execute(
+                    "SELECT table_name FROM information_schema.tables"
+                ).fetchall()
+            }
+        assert {"model_prices", "eval_runs", "eval_requests", "eval_request_costs", "eval_summary"} <= created
+
+    def test_import_prices_populates_the_table_from_a_spreadsheet(self, tmp_path: Path):
+        database = tmp_path / "eval.duckdb"
+
+        assert main(["import-prices", str(self._price_sheet(tmp_path / "p.xlsx")), "--db", str(database)]) == 0
+
+        with open_store(database) as store:
+            assert [price.model for price in store.prices()] == ["vendor-a"]
+
+    def test_sql_applies_a_write_statement_instead_of_crashing_on_an_empty_result(self, tmp_path: Path):
+        database = tmp_path / "eval.duckdb"
+        main(["import-prices", str(self._price_sheet(tmp_path / "p.xlsx")), "--db", str(database)])
+
+        assert main(["sql", "--db", str(database), "UPDATE model_prices SET output_per_1m = 60.0"]) == 0
+        assert main(["sql", "--db", str(database), "SELECT * FROM model_prices"]) == 0
+
+        with open_store(database) as store:
+            assert store.prices()[0].output_per_1m == 60.0
+
+    def test_templates_are_written_where_asked(self, tmp_path: Path):
+        assert main(["templates", str(tmp_path / "inputs")]) == 0
+
+        assert (tmp_path / "inputs" / "workload_template.xlsx").is_file()
+        assert (tmp_path / "inputs" / "pricing_template.xlsx").is_file()
 
 
 class TestOutput:

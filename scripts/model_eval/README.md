@@ -90,6 +90,15 @@ Rows that cannot be parsed are reported as warnings and skipped rather than abor
 
 ## Input: the price table
 
+There is no init step. Every command opens the DuckDB file given by `--db` (default
+`model_eval.duckdb`), creating it and running the schema if it is not there yet, so the first
+thing you do can be the import:
+
+```bash
+python -m model_eval templates ./inputs                 # starter workbooks
+python -m model_eval import-prices ./inputs/pricing_template.xlsx --db eval.duckdb
+```
+
 Prices live in the `model_prices` table, one row per proxy model. It doubles as the list of models
 to evaluate, so a model with no enabled row is never called (`--model` selects a subset of it)
 
@@ -104,18 +113,26 @@ to evaluate, so a model with no enabled row is never called (`--model` selects a
 | `currency` | no | label only, no conversion is done; defaults to `USD` |
 | `enabled` | no | set `FALSE` to park a vendor without deleting its history |
 
-Maintain it whichever way suits you. From a spreadsheet:
+Maintain it whichever way suits you. `import-prices` replaces the whole table, which is what you
+want when the spreadsheet is the master copy. For a single vendor, or a single corrected number,
+go straight at the table:
 
 ```bash
-python -m model_eval templates ./inputs                       # starter workbooks
-python -m model_eval import-prices ./inputs/prices.xlsx       # replaces the whole table
+python -m model_eval sql --db eval.duckdb "
+  INSERT INTO model_prices (model, label, input_per_1m, output_per_1m, cache_read_per_1m, currency)
+  VALUES ('deepseek-volcengine', 'Volcengine / deepseek-v3', 2.0, 8.0, 0.4, 'CNY')"
+
+python -m model_eval sql --db eval.duckdb "
+  UPDATE model_prices SET output_per_1m = 9.0 WHERE model = 'deepseek-volcengine'"
+
+python -m model_eval sql --db eval.duckdb "
+  UPDATE model_prices SET enabled = FALSE WHERE model = 'mock-fast'"
+
+python -m model_eval list-prices --db eval.duckdb
 ```
 
-Or directly, which is the quickest way to correct one number:
-
-```bash
-python -m model_eval sql "UPDATE model_prices SET output_per_1m = 8.0 WHERE model = 'deepseek-volcengine'"
-```
+`quickstart.sh` does the import for you on every `up` and `demo`, from `prices.xlsx` in the
+workspace; edit that spreadsheet and run `quickstart.sh up` again to reload it
 
 Costs are never mixed across currencies; each model is totalled in its own
 
