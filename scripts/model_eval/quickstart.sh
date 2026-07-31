@@ -120,6 +120,11 @@ load_prices() {
     eval_cli import-prices "$WORKSPACE/prices.xlsx" --db "$DB"
 }
 
+reload_prices() {
+    say "reloading prices from $WORKSPACE/prices.xlsx into $DB"
+    eval_cli import-prices "$WORKSPACE/prices.xlsx" --db "$DB"
+}
+
 replay() {
     # shellcheck disable=SC1091  # generated from .env.example at first run
     . "$WORKSPACE/.env"
@@ -172,14 +177,22 @@ cmd_status() {
     printf 'workspace %s\n' "$WORKSPACE"
 }
 
+cmd_restart() {
+    ensure_venv
+    cmd_down
+    cmd_up
+}
+
 case "${1:-demo}" in
     up)     cmd_up ;;
     demo)   cmd_demo ;;
     run)    shift; ensure_venv; replay "$@" ;;
+    reload-prices) ensure_venv; reload_prices ;;
+    restart) ensure_venv; cmd_restart ;;
     report) shift; ensure_venv; eval_cli report --db "$DB" "$@" ;;
     prices) shift; ensure_venv; eval_cli list-prices --db "$DB" "$@" ;;
     sql)    shift; ensure_venv; eval_cli sql --db "$DB" "$@" ;;
     status) cmd_status ;;
     down)   cmd_down ;;
-    *)      die "unknown command '${1}'; try: demo | up | run | report | prices | sql | status | down" ;;
+    *)      die "unknown command '${1}'; try: demo | up | run | reload-prices | restart | report | prices | sql | status | down" ;;
 esac
