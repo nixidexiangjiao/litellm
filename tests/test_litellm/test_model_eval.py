@@ -185,12 +185,12 @@ class TestWorkloadLoading:
         path = self._write(
             tmp_path / "workload.xlsx",
             [
-                ["userId", "time", "body"],
-                ["u-1", "2026-01-01 10:00:00", body],
-                ["u-2", "2026-01-01 11:00:00", "not json"],
-                ["u-3", "nonsense-date", body],
-                [None, None, None],
-                ["u-4", 1767261600, body],
+                ["ID", "StartTime", "UserId", "Input"],
+                ["req-1", "2026-01-01 10:00:00", "u-1", body],
+                ["req-2", "2026-01-01 11:00:00", "u-2", "not json"],
+                ["req-3", "nonsense-date", "u-3", body],
+                [None, None, None, None],
+                ["req-4", 1767261600, "u-4", body],
             ],
         )
 
@@ -203,7 +203,7 @@ class TestWorkloadLoading:
 
     def test_keeps_the_first_row_when_it_is_already_data(self, tmp_path: Path):
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}]})
-        path = self._write(tmp_path / "workload.xlsx", [["u-1", "2026-01-01 10:00:00", body]])
+        path = self._write(tmp_path / "workload.xlsx", [["req-1", "2026-01-01 10:00:00", "u-1", body]])
 
         assert len(load_workload(path).rows) == 1
 

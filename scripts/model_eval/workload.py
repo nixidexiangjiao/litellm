@@ -1,8 +1,8 @@
 """Load the replay workload from an Excel sheet.
 
 Column layout is positional, matching how the traffic export is produced:
-column A is the user id, column B is the request timestamp, column C is the
-recorded OpenAI ``/v1/chat/completions`` request body as JSON text.
+column A is the request id, column B is the request StartTime, column C is the
+UserId, and column D is the recorded OpenAI ``/v1/chat/completions`` request body as JSON text.
 
 ``openpyxl`` is imported inside the loader rather than at module scope: it is
 the one dependency this tool adds on top of LiteLLM's own, and every parsing
@@ -15,6 +15,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from numbers import Real
 from pathlib import Path
 from typing import Union
 
@@ -93,22 +94,22 @@ def _build_workload(raw_rows: Sequence[tuple[int, Sequence[object]]]) -> Workloa
 
 
 def _parse_row(sheet_row: int, cells: Sequence[object]) -> WorkloadRow | RowProblem:
-    if len(cells) < 3:
-        return RowProblem(sheet_row, f"expected 3 columns, found {len(cells)}")
+    if len(cells) < 4:
+        return RowProblem(sheet_row, f"expected 4 columns, found {len(cells)}")
 
-    user_id = _parse_user_id(cells[0])
+    user_id = _parse_user_id(cells[2])
     if user_id is None:
-        return RowProblem(sheet_row, "column A (userId) is empty")
+        return RowProblem(sheet_row, "column C (UserId) is empty")
 
     timestamp = _parse_timestamp(cells[1])
     if timestamp is None:
-        return RowProblem(sheet_row, f"column B is not a recognisable timestamp: {cells[1]!r}")
+        return RowProblem(sheet_row, f"column B (StartTime) is not a recognisable timestamp: {cells[1]!r}")
 
-    body = _parse_body(cells[2])
+    body = _parse_body(cells[3])
     if body is None:
-        return RowProblem(sheet_row, "column C is not a JSON object")
+        return RowProblem(sheet_row, "column D (Input) is not a JSON object")
     if not isinstance(body.get("messages"), list):
-        return RowProblem(sheet_row, "column C has no 'messages' array")
+        return RowProblem(sheet_row, "column D (Input) has no 'messages' array")
 
     return WorkloadRow(sheet_row=sheet_row, user_id=user_id, timestamp=timestamp, body=body)
 
@@ -121,7 +122,7 @@ def _is_header(raw_rows: Sequence[tuple[int, Sequence[object]]]) -> bool:
     if not raw_rows:
         return False
     _, cells = raw_rows[0]
-    return len(cells) < 3 or _parse_body(cells[2]) is None
+    return len(cells) < 4 or _parse_body(cells[3]) is None
 
 
 def _parse_user_id(value: object) -> str | None:

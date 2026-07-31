@@ -77,9 +77,10 @@ JSON is treated as a header and skipped)
 
 | column | meaning |
 | --- | --- |
-| A | user id |
-| B | request timestamp |
-| C | the recorded request body, JSON, OpenAI `/v1/chat/completions` shape |
+| A | request id |
+| B | StartTime |
+| C | UserId |
+| D | Input (the recorded request body, JSON, OpenAI `/v1/chat/completions` shape) |
 
 Timestamps may be real Excel date cells, `2026-01-30 09:15:00`, ISO 8601, or a unix epoch in
 seconds or milliseconds. Rows are replayed sorted by user id, then timestamp, then sheet position,

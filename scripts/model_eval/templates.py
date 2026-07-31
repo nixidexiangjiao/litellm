@@ -36,10 +36,10 @@ def write_workload_template(path: Path) -> None:
     workbook = Workbook()
     sheet = workbook.worksheets[0]
     sheet.title = "requests"
-    sheet.append(["user_id", "timestamp", "body"])
-    for user_id, timestamp, prompt in _PROMPTS:
-        sheet.append([user_id, timestamp, json.dumps(_body(prompt), ensure_ascii=False)])
-    _finish(workbook, sheet_widths=(16, 22, 120), path=path)
+    sheet.append(["ID", "StartTime", "UserId", "Input"])
+    for index, (user_id, timestamp, prompt) in enumerate(_PROMPTS, start=1):
+        sheet.append([f"req-{index}", timestamp, user_id, json.dumps(_body(prompt), ensure_ascii=False)])
+    _finish(workbook, sheet_widths=(16, 22, 16, 120), path=path)
 
 
 def write_pricing_template(path: Path) -> None:
