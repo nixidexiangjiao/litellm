@@ -28,7 +28,7 @@ _CONSOLE_HEADERS = (
     "cache hit",
     "cost",
     "cost/req",
-    "cost/1M out",
+    "cost/1M out (all-in)",
 )
 
 
