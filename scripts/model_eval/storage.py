@@ -41,8 +41,11 @@ CREATE TABLE IF NOT EXISTS model_prices (
     cache_read_per_1m  DOUBLE,
     cache_write_per_1m DOUBLE,
     currency           VARCHAR NOT NULL DEFAULT 'USD',
+    discount_factor    DOUBLE,
     enabled            BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS discount_factor DOUBLE;
 
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id       VARCHAR PRIMARY KEY,
@@ -99,6 +102,7 @@ WITH priced AS (
         p.output_per_1m,
         COALESCE(p.cache_read_per_1m, p.input_per_1m)  AS cache_read_per_1m,
         COALESCE(p.cache_write_per_1m, p.input_per_1m) AS cache_write_per_1m,
+        COALESCE(p.discount_factor, 1.0) AS discount_factor,
         LEAST(COALESCE(r.cached_tokens, 0), COALESCE(r.prompt_tokens, 0)) AS billed_cache_read
     FROM eval_requests AS r
     LEFT JOIN model_prices AS p ON p.model = r.model
@@ -115,14 +119,14 @@ SELECT
     split.* EXCLUDE (input_per_1m, output_per_1m, cache_read_per_1m, cache_write_per_1m),
     CASE WHEN total_ms > 0 THEN completion_tokens / (total_ms / 1000) END AS output_tokens_per_s,
     (COALESCE(prompt_tokens, 0) - billed_cache_read - billed_cache_write)
-        * input_per_1m / 1e6 AS cost_uncached_input,
-    billed_cache_read  * cache_read_per_1m  / 1e6 AS cost_cached_input,
-    billed_cache_write * cache_write_per_1m / 1e6 AS cost_cache_write,
-    completion_tokens  * output_per_1m      / 1e6 AS cost_output,
-    (COALESCE(prompt_tokens, 0) - billed_cache_read - billed_cache_write) * input_per_1m / 1e6
-        + billed_cache_read  * cache_read_per_1m  / 1e6
-        + billed_cache_write * cache_write_per_1m / 1e6
-        + completion_tokens  * output_per_1m      / 1e6 AS cost_total
+        * input_per_1m * discount_factor / 1e6 AS cost_uncached_input,
+    billed_cache_read  * cache_read_per_1m * discount_factor / 1e6 AS cost_cached_input,
+    billed_cache_write * cache_write_per_1m * discount_factor / 1e6 AS cost_cache_write,
+    completion_tokens  * output_per_1m * discount_factor / 1e6 AS cost_output,
+    (COALESCE(prompt_tokens, 0) - billed_cache_read - billed_cache_write) * input_per_1m * discount_factor / 1e6
+        + billed_cache_read  * cache_read_per_1m * discount_factor / 1e6
+        + billed_cache_write * cache_write_per_1m * discount_factor / 1e6
+        + completion_tokens  * output_per_1m * discount_factor / 1e6 AS cost_total
 FROM split;
 
 CREATE OR REPLACE VIEW eval_summary AS
@@ -166,6 +170,7 @@ _PRICE_COLUMNS = (
     "cache_read_per_1m",
     "cache_write_per_1m",
     "currency",
+    "discount_factor",
 )
 
 _REQUEST_COLUMNS = (
@@ -292,6 +297,7 @@ class EvalStore:
                     price.cache_read_per_1m,
                     price.cache_write_per_1m,
                     price.currency,
+                    price.discount_factor,
                 )
                 for price in prices
             ],
@@ -378,6 +384,7 @@ def _to_price(row: Sequence[object]) -> ModelPrice:
         cache_read_per_1m=float(row[4]) if row[4] is not None else None,  # pyright: ignore[reportArgumentType]
         cache_write_per_1m=float(row[5]) if row[5] is not None else None,  # pyright: ignore[reportArgumentType]
         currency=str(row[6]),
+        discount_factor=float(row[7]) if row[7] is not None else None,  # pyright: ignore[reportArgumentType]
     )
 
 

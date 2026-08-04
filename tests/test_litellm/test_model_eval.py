@@ -505,6 +505,18 @@ class TestPriceStorage:
 
         assert [price.model for price in store.prices()] == ["vendor-a"]
 
+    def test_discount_factor_is_imported_and_stored(self, store: EvalStore, tmp_path: Path):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.worksheets[0]
+        sheet.append(["model", "input_per_1m", "output_per_1m", "discount_factor"])
+        sheet.append(["vendor-a", 1, 2, 0.8])
+        workbook.save(tmp_path / "p.xlsx")
+
+        store.replace_prices(load_price_table(tmp_path / "p.xlsx").prices)
+        price = store.prices()[0]
+
+        assert price.discount_factor == pytest.approx(0.8)
+
     def test_excel_import_feeds_the_table(self, store: EvalStore, tmp_path: Path):
         workbook = openpyxl.Workbook()
         sheet = workbook.worksheets[0]

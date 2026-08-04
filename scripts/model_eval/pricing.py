@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REQUIRED_COLUMNS = ("model", "input_per_1m", "output_per_1m")
-OPTIONAL_COLUMNS = ("label", "cache_read_per_1m", "cache_write_per_1m", "currency")
+OPTIONAL_COLUMNS = (
+    "label",
+    "cache_read_per_1m",
+    "cache_write_per_1m",
+    "currency",
+    "discount_factor",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +34,7 @@ class ModelPrice:
     cache_read_per_1m: float | None
     cache_write_per_1m: float | None
     currency: str
+    discount_factor: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +108,7 @@ def _parse_price_row(sheet_row: int, header: Sequence[str], cells: Sequence[obje
         cache_read_per_1m=_parse_money(values.get("cache_read_per_1m")),
         cache_write_per_1m=_parse_money(values.get("cache_write_per_1m")),
         currency=str(values.get("currency") or "").strip().upper() or "USD",
+        discount_factor=_parse_discount_factor(values.get("discount_factor")),
     )
 
 
@@ -114,6 +122,20 @@ def _parse_money(value: object) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip().lstrip("$￥¥€£").replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_discount_factor(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
     if not text:
         return None
     try:

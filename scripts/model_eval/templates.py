@@ -24,9 +24,9 @@ _PROMPTS = (
 )
 
 _PRICE_ROWS = (
-    ("mock-fast", 0.27, 1.10, "bundled mock provider", 0.07, 0.0, "USD"),
-    ("deepseek-official", 0.27, 1.10, "DeepSeek / deepseek-chat", 0.07, 0.0, "USD"),
-    ("deepseek-siliconflow", 2.0, 8.0, "SiliconFlow / DeepSeek-V3", 0.4, 0.0, "CNY"),
+    ("mock-fast", 0.27, 1.10, "bundled mock provider", 0.07, 0.0, "USD", 1.0),
+    ("deepseek-official", 0.27, 1.10, "DeepSeek / deepseek-chat", 0.07, 0.0, "USD", 1.0),
+    ("deepseek-siliconflow", 2.0, 8.0, "SiliconFlow / DeepSeek-V3", 0.4, 0.0, "CNY", 1.0),
 )
 
 
