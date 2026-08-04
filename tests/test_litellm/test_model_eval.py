@@ -207,6 +207,16 @@ class TestWorkloadLoading:
 
         assert len(load_workload(path).rows) == 1
 
+    def test_reads_csv_workloads(self, tmp_path: Path):
+        body = json.dumps({"model": "recorded", "messages": [{"role": "user", "content": "hi"}]})
+        path = tmp_path / "workload.csv"
+        path.write_text(f"ID,StartTime,UserId,Input\nreq-1,2026-01-01 10:00:00,u-1,{body}\n", encoding="utf-8")
+
+        workload = load_workload(path)
+
+        assert [row.user_id for row in workload.rows] == ["u-1"]
+        assert workload.rows[0].body["model"] == "recorded"
+
     def test_generated_templates_are_loadable_and_demo_ready(self, tmp_path: Path):
         write_workload_template(tmp_path / "w.xlsx")
         write_pricing_template(tmp_path / "p.xlsx")

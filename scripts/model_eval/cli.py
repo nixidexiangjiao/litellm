@@ -223,9 +223,9 @@ def _select_prices(store: EvalStore, models: tuple[str, ...]) -> tuple[ModelPric
 
 def _write_templates(directory: Path) -> int:
     directory.mkdir(parents=True, exist_ok=True)
-    write_workload_template(directory / "workload_template.xlsx")
+    write_workload_template(directory / "workload_template.csv")
     write_pricing_template(directory / "pricing_template.xlsx")
-    _say(f"wrote {directory / 'workload_template.xlsx'}\nwrote {directory / 'pricing_template.xlsx'}")
+    _say(f"wrote {directory / 'workload_template.csv'}\nwrote {directory / 'pricing_template.xlsx'}")
     return 0
 
 
@@ -268,8 +268,12 @@ def _build_parser() -> argparse.ArgumentParser:
     database.add_argument("--db", default=_DEFAULT_DB, help=f"DuckDB file (default: {_DEFAULT_DB})")
 
     run = subparsers.add_parser("run", parents=[database], help="replay the workload against every enabled model")
-    run.add_argument("--workload", required=True, help="Excel: column A userId, column B time, column C request body")
-    run.add_argument("--workload-sheet", default=None, help="worksheet name (default: the first sheet)")
+    run.add_argument(
+        "--workload",
+        required=True,
+        help="workload file; accepts .xlsx/.xlsm/.csv with positional columns: ID, StartTime, UserId, Input",
+    )
+    run.add_argument("--workload-sheet", default=None, help="worksheet name for Excel workbooks (default: the first sheet)")
     run.add_argument("--base-url", default="http://localhost:4000", help="LiteLLM proxy base URL")
     run.add_argument(
         "--api-key",

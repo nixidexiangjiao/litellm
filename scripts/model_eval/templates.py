@@ -8,6 +8,7 @@ vendor key at all.
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,14 @@ _PRICE_ROWS = (
 
 
 def write_workload_template(path: Path) -> None:
+    if path.suffix.lower() == ".csv":
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["ID", "StartTime", "UserId", "Input"])
+            for index, (user_id, timestamp, prompt) in enumerate(_PROMPTS, start=1):
+                writer.writerow([f"req-{index}", timestamp, user_id, json.dumps(_body(prompt), ensure_ascii=False)])
+        return
+
     from openpyxl import Workbook
 
     workbook = Workbook()

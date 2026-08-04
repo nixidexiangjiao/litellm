@@ -55,12 +55,12 @@ ensure_venv() {
 }
 
 ensure_inputs() {
-    if [ ! -f "$WORKSPACE/workload.xlsx" ] || [ ! -f "$WORKSPACE/prices.xlsx" ]; then
-        say "writing starter workload.xlsx and prices.xlsx"
+    if [ ! -f "$WORKSPACE/workload.csv" ] || [ ! -f "$WORKSPACE/prices.xlsx" ]; then
+        say "writing starter workload.csv and prices.xlsx"
         eval_cli templates "$WORKSPACE" >/dev/null
-        [ -f "$WORKSPACE/workload.xlsx" ] || mv "$WORKSPACE/workload_template.xlsx" "$WORKSPACE/workload.xlsx"
+        [ -f "$WORKSPACE/workload.csv" ] || mv "$WORKSPACE/workload_template.csv" "$WORKSPACE/workload.csv"
         [ -f "$WORKSPACE/prices.xlsx" ] || mv "$WORKSPACE/pricing_template.xlsx" "$WORKSPACE/prices.xlsx"
-        rm -f "$WORKSPACE/workload_template.xlsx" "$WORKSPACE/pricing_template.xlsx"
+        rm -f "$WORKSPACE/workload_template.csv" "$WORKSPACE/workload_template.xlsx" "$WORKSPACE/pricing_template.xlsx"
     fi
 }
 
@@ -84,6 +84,45 @@ is_running() {
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
 }
 
+ensure_port_free() {
+    local port="$1" name="$2"
+    local pidfile="$RUN_DIR/$name.pid"
+
+    if [ -f "$pidfile" ]; then
+        local pid
+        pid="$(cat "$pidfile")"
+        if kill -0 "$pid" 2>/dev/null; then
+            say "stopping existing $name (pid $pid) on port $port"
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidfile"
+    fi
+
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -k "$port/tcp" >/dev/null 2>&1 || true
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti tcp:"$port" | xargs -r kill -9 >/dev/null 2>&1 || true
+    fi
+
+    if python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket, sys
+with socket.socket() as sock:
+    try:
+        sock.bind(("127.0.0.1", int(sys.argv[1])))
+    except OSError:
+        raise SystemExit(1)
+    raise SystemExit(0)
+PY
+    then
+        return 0
+    fi
+
+    die "$name needs port $port but it is already in use"
+}
+
 wait_for() {
     local url="$1" name="$2" waited=0
     while [ "$waited" -lt "$READY_TIMEOUT" ]; do
@@ -99,6 +138,7 @@ wait_for() {
 }
 
 start_mock() {
+    ensure_port_free "$MOCK_PORT" mock
     start_background mock env PYTHONPATH="$SCRIPT_DIR/.." "$VENV/bin/python" -m model_eval.mock_provider \
         --port "$MOCK_PORT" --ttft 0.25 --tpot 0.03
     sleep 1
@@ -107,6 +147,7 @@ start_mock() {
 }
 
 start_proxy() {
+    ensure_port_free "$PROXY_PORT" proxy
     set -a
     # shellcheck disable=SC1091  # generated from .env.example at first run
     . "$WORKSPACE/.env"
@@ -130,7 +171,7 @@ replay() {
     . "$WORKSPACE/.env"
     eval_cli run \
         --db "$DB" \
-        --workload "$WORKSPACE/workload.xlsx" \
+        --workload "$WORKSPACE/workload.csv" \
         --base-url "http://127.0.0.1:$PROXY_PORT" \
         --api-key "${LITELLM_API_KEY:-}" \
         "$@"

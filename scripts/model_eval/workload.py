@@ -1,4 +1,4 @@
-"""Load the replay workload from an Excel sheet.
+"""Load the replay workload from an Excel sheet or a CSV file.
 
 Column layout is positional, matching how the traffic export is produced:
 column A is the request id, column B is the request StartTime, column C is the
@@ -11,6 +11,7 @@ and ordering rule below stays importable (and testable) without it.
 
 from __future__ import annotations
 
+import csv
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -64,6 +65,9 @@ class Workload:
 
 
 def load_workload(path: Path, sheet_name: str | None = None) -> Workload:
+    if path.suffix.lower() == ".csv" or path.suffix == "":
+        return _load_csv_workload(path)
+
     from openpyxl import load_workbook
 
     workbook = load_workbook(path, read_only=True, data_only=True)
@@ -77,6 +81,20 @@ def load_workload(path: Path, sheet_name: str | None = None) -> Workload:
     finally:
         workbook.close()
 
+    return _build_workload(raw_rows[1:] if _is_header(raw_rows) else raw_rows)
+
+
+def _load_csv_workload(path: Path) -> Workload:
+    rows: list[list[str]] = []
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.reader(handle):
+            if not row:
+                continue
+            if len(row) < 4:
+                row = [*row, *([""] * (4 - len(row)))]
+            rows.append(row)
+
+    raw_rows = tuple((index, cells) for index, cells in enumerate(rows, start=1) if _has_content(cells))
     return _build_workload(raw_rows[1:] if _is_header(raw_rows) else raw_rows)
 
 
