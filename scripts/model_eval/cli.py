@@ -36,6 +36,7 @@ class RunOptions:
     repeat: int
     limit: int | None
     sleep_s: float
+    concurrency: int
     note: str
     xlsx: Path | None
     dry_run: bool
@@ -122,6 +123,7 @@ def _execute(
             stream_mode=options.stream_mode,
             repeat=options.repeat,
             sleep_s=options.sleep_s,
+            concurrency=options.concurrency,
         )
         for _ in _until_interrupted(_with_progress(_tee_to_store(stream, store, run_id), planned)):
             pass
@@ -241,6 +243,7 @@ def _to_run_options(namespace: argparse.Namespace) -> RunOptions:
         repeat=namespace.repeat,
         limit=namespace.limit,
         sleep_s=namespace.sleep,
+        concurrency=namespace.concurrency,
         note=namespace.note or "",
         xlsx=Path(namespace.xlsx) if namespace.xlsx else None,
         dry_run=namespace.dry_run,
@@ -291,6 +294,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--repeat", type=int, default=1, help="replay the whole workload N times per model")
     run.add_argument("--limit", type=int, default=None, help="only replay the first N ordered requests")
     run.add_argument("--sleep", type=float, default=0.0, help="seconds to wait between requests")
+    run.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="race up to N per-user request chains in parallel; each user's requests stay ordered (default: 1 = strictly sequential)",
+    )
     run.add_argument("--note", default=None, help="free text stored on the run, e.g. what you were testing")
     run.add_argument("--xlsx", default=None, help="also export this run to a workbook")
     run.add_argument("--dry-run", action="store_true", help="print the plan without calling anything")
