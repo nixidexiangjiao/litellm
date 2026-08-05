@@ -7,6 +7,7 @@ instead of going through an SDK that would normalise or drop unknown fields.
 from __future__ import annotations
 
 import json
+import random
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -28,6 +29,9 @@ class ProxyTarget:
     base_url: str
     api_key: str
     timeout_s: float
+    retries: int = 0
+    retry_delay_s: float = 3.0
+    retry_sleep: Callable[[float], None] = time.sleep
 
     @property
     def chat_completions_url(self) -> str:
@@ -72,6 +76,7 @@ class CallFailed:
     total_ms: float
     status_code: int | None
     detail: str
+    retry_after_s: float | None = None
 
 
 CallOutcome = CallSucceeded | CallFailed
@@ -178,10 +183,53 @@ def call_model(
     clock: Callable[[], float] = time.perf_counter,
 ) -> CallOutcome:
     payload = prepare_body(body, model, stream_mode)
-    started = clock()
-    if payload.get("stream") is True:
-        return _call_streaming(client, target, payload, started, clock)
-    return _call_blocking(client, target, payload, started, clock)
+    for attempt in range(max(1, target.retries + 1)):
+        started = clock()
+        if payload.get("stream") is True:
+            outcome = _call_streaming(client, target, payload, started, clock)
+        else:
+            outcome = _call_blocking(client, target, payload, started, clock)
+        if not _retryable(outcome) or attempt >= target.retries:
+            return outcome
+        target.retry_sleep(_backoff_seconds(outcome, attempt, target.retry_delay_s))
+    return outcome  # unreachable: the loop always returns
+
+
+_RATE_LIMIT_HINTS = ("rate_limit", "rate limit", "ratelimit", "429", "tpm", "throttl")
+
+
+def _retryable(outcome: CallOutcome) -> bool:
+    """Provider throttling is worth re-trying; other failures replay the same way.
+
+    Some proxies wrap upstream rate limits in a 500 (the detail text then
+    carries the provider's rate-limit marker), so sniff those too.
+    """
+    if not isinstance(outcome, CallFailed):
+        return False
+    if outcome.status_code in (429, 503):
+        return True
+    if outcome.status_code == 500:
+        detail = (outcome.detail or "").lower()
+        return any(hint in detail for hint in _RATE_LIMIT_HINTS)
+    return False
+
+
+def _backoff_seconds(outcome: CallFailed, attempt: int, base_delay: float) -> float:
+    """Exponential backoff with jitter, honouring Retry-After when the provider sets it."""
+    delay = base_delay * (2**attempt) * random.uniform(0.8, 1.2)
+    if outcome.retry_after_s is not None:
+        delay = max(delay, outcome.retry_after_s)
+    return delay
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _call_blocking(
@@ -203,7 +251,7 @@ def _call_blocking(
 
     total_ms = _ms(clock() - started)
     if response.status_code != httpx.codes.OK:
-        return CallFailed("http_status", total_ms, response.status_code, _truncate_error(response.text))
+        return CallFailed("http_status", total_ms, response.status_code, _truncate_error(response.text), retry_after_s=_retry_after(response))
 
     completion = _validate(Completion, response.text)
     if completion is None:
@@ -244,7 +292,7 @@ def _call_streaming(
         ) as response:
             if response.status_code != httpx.codes.OK:
                 detail = _truncate_error(response.read().decode("utf-8", errors="replace"))
-                return CallFailed("http_status", _ms(clock() - started), response.status_code, detail)
+                return CallFailed("http_status", _ms(clock() - started), response.status_code, detail, retry_after_s=_retry_after(response))
             chunks = tuple(_timed_chunks(response.iter_lines(), started, clock))
             reported_cost = _reported_cost(response.headers)
     except httpx.HTTPError as error:

@@ -37,6 +37,8 @@ class RunOptions:
     limit: int | None
     sleep_s: float
     concurrency: int
+    retries: int
+    retry_delay_s: float
     note: str
     xlsx: Path | None
     dry_run: bool
@@ -113,7 +115,13 @@ def _execute(
     rows: Sequence[WorkloadRow],
     planned: int,
 ) -> None:
-    target = ProxyTarget(base_url=options.base_url, api_key=options.api_key, timeout_s=options.timeout_s)
+    target = ProxyTarget(
+        base_url=options.base_url,
+        api_key=options.api_key,
+        timeout_s=options.timeout_s,
+        retries=options.retries,
+        retry_delay_s=options.retry_delay_s,
+    )
     with httpx.Client(timeout=options.timeout_s) as client:
         stream = run_evaluation(
             client=client,
@@ -244,6 +252,8 @@ def _to_run_options(namespace: argparse.Namespace) -> RunOptions:
         limit=namespace.limit,
         sleep_s=namespace.sleep,
         concurrency=namespace.concurrency,
+        retries=namespace.retries,
+        retry_delay_s=namespace.retry_delay,
         note=namespace.note or "",
         xlsx=Path(namespace.xlsx) if namespace.xlsx else None,
         dry_run=namespace.dry_run,
@@ -299,6 +309,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="race up to N per-user request chains in parallel; each user's requests stay ordered (default: 1 = strictly sequential)",
+    )
+    run.add_argument(
+        "--retries",
+        type=int,
+        default=4,
+        help="retry throttled calls (HTTP 429/503) up to N times with exponential backoff (default: 4; 0 disables)",
+    )
+    run.add_argument(
+        "--retry-delay",
+        type=float,
+        default=3.0,
+        help="base delay in seconds for throttled-call backoff; doubles per attempt with jitter (default: 3.0)",
     )
     run.add_argument("--note", default=None, help="free text stored on the run, e.g. what you were testing")
     run.add_argument("--xlsx", default=None, help="also export this run to a workbook")
