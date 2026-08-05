@@ -17,7 +17,17 @@ scripts/model_eval/quickstart.sh demo
 That creates a workspace (default `./model-eval`, override with `MODEL_EVAL_HOME`), installs
 `litellm[proxy]`, `duckdb` and `openpyxl` into a venv inside it, starts a bundled mock provider
 plus the proxy, replays a sample workload and prints the report. No vendor key needed, so you can
-confirm the whole chain works before spending anything
+confirm the whole chain works before spending anything.
+
+For a real run with the same quickstart tooling:
+
+```bash
+cd scripts/model_eval
+./quickstart.sh run --model mock-fast --repeat 1 --note "test" --xlsx "report2.xlsx"
+```
+
+This example uses the mock provider configured by `quickstart.sh`, evaluates only the `mock-fast`
+model once, stores the run note as `test`, and exports the summary workbook to `report2.xlsx`.
 
 Then point it at real vendors:
 
