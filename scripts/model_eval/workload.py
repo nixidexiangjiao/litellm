@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -85,6 +86,9 @@ def load_workload(path: Path, sheet_name: str | None = None) -> Workload:
 
 
 def _load_csv_workload(path: Path) -> Workload:
+    # Recorded request bodies embed full tool schemas and routinely exceed the
+    # csv module's default 128 KiB field limit.
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
     rows: list[list[str]] = []
     with path.open(encoding="utf-8", newline="") as handle:
         for row in csv.reader(handle):
